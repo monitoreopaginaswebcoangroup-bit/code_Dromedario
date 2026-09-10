@@ -292,38 +292,38 @@ export function MvpApp() {
 
   async function createCustomer(payload: Partial<Customer>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("customers").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from("dromedario_customers").insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function createContact(payload: Partial<Contact>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("contacts").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from("dromedario_contacts").insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function updateContact(id: string, payload: Partial<Contact>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("contacts").update(payload).eq("id", id);
+    const { error } = await supabase.from("dromedario_contacts").update(payload).eq("id", id);
     if (error) throw error;
   }
 
   async function createProduct(payload: Partial<Product>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("products").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from("dromedario_products").insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function updateProduct(id: string, payload: Partial<Product>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("products").update(payload).eq("id", id);
+    const { error } = await supabase.from("dromedario_products").update(payload).eq("id", id);
     if (error) throw error;
   }
 
   async function setCustomerProductPrice(customerId: string, productId: string, price: number) {
     if (!supabase || !profile) return;
     const { error } = await supabase
-      .from("customer_product_prices")
+      .from("dromedario_customer_product_prices")
       .upsert({ customer_id: customerId, product_id: productId, price, created_by: profile.id }, { onConflict: "customer_id,product_id" });
     if (error) throw error;
   }
@@ -351,7 +351,7 @@ export function MvpApp() {
     if (!canCreateOrderForRole(profile.role)) throw new Error("Tu rol no puede crear pedidos.");
 
     const { data: order, error: orderError } = await supabase
-      .from("orders")
+      .from("dromedario_orders")
       .insert({
         status: "pending_approval",
         customer_id: draft.customer_id,
@@ -380,10 +380,10 @@ export function MvpApp() {
       };
     });
 
-    const { error: itemsError } = await supabase.from("order_items").insert(items);
+    const { error: itemsError } = await supabase.from("dromedario_order_items").insert(items);
     if (itemsError) throw itemsError;
 
-    const { error: eventError } = await supabase.from("order_events").insert({
+    const { error: eventError } = await supabase.from("dromedario_order_events").insert({
       order_id: order.id,
       from_status: null,
       to_status: "pending_approval",
@@ -398,7 +398,7 @@ export function MvpApp() {
   async function uploadOrderFile(orderId: string, file: File) {
     if (!supabase) return null;
     const path = `${orderId}/${Date.now()}-${sanitizeFileName(file.name)}`;
-    const { error } = await supabase.storage.from("order-documents").upload(path, file, {
+    const { error } = await supabase.storage.from("dromedario-order-documents").upload(path, file, {
       cacheControl: "3600",
       upsert: false
     });
@@ -461,10 +461,10 @@ export function MvpApp() {
       metadata.reason = extras.note;
     }
 
-    const { error: updateError } = await supabase.from("orders").update(update).eq("id", order.id);
+    const { error: updateError } = await supabase.from("dromedario_orders").update(update).eq("id", order.id);
     if (updateError) throw updateError;
 
-    const { error: eventError } = await supabase.from("order_events").insert({
+    const { error: eventError } = await supabase.from("dromedario_order_events").insert({
       order_id: order.id,
       from_status: order.status,
       to_status: update.status ?? transition.to,
@@ -478,7 +478,7 @@ export function MvpApp() {
 
   async function openAttachment(path: string) {
     if (!supabase) return;
-    const { data: signed, error } = await supabase.storage.from("order-documents").createSignedUrl(path, 120);
+    const { data: signed, error } = await supabase.storage.from("dromedario-order-documents").createSignedUrl(path, 120);
     if (error) {
       setFeedback({ type: "error", text: error.message });
       return;
@@ -840,7 +840,7 @@ function SetupRequired() {
         <h1>Conecta Supabase para activar el sistema.</h1>
         <p className="muted">Crea `.env.local` con las variables publicas del proyecto y ejecuta el SQL incluido.</p>
         <pre className="notice code-block">NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co{"\n"}NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key</pre>
-        <p className="muted">Despues corre `supabase/schema.sql` y agrega `dromedario` en Project Settings, API, Exposed schemas.</p>
+        <p className="muted">Despues corre `supabase/schema.sql` en el SQL Editor de tu proyecto Supabase.</p>
       </section>
     </main>
   );
@@ -2954,7 +2954,7 @@ function flowStateLabel(state: "completed" | "current" | "pending" | "blocked") 
 
 async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Session) {
   const { data: profileData, error: profileError } = await supabase
-    .from("profiles")
+    .from("dromedario_profiles")
     .select("*")
     .eq("id", session.user.id)
     .maybeSingle();
@@ -2965,7 +2965,7 @@ async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Sessio
 
   if (!profile) {
     const { data: insertedProfile, error: insertError } = await supabase
-      .from("profiles")
+      .from("dromedario_profiles")
       .insert({
         id: session.user.id,
         email: session.user.email ?? "sin-correo@local",
@@ -2979,14 +2979,14 @@ async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Sessio
   }
 
   const [profiles, customers, contacts, products, customerProductPrices, orders, orderItems, events] = await Promise.all([
-    supabase.from("profiles").select("*").order("full_name", { ascending: true }),
-    supabase.from("customers").select("*").order("legal_name", { ascending: true }),
-    supabase.from("contacts").select("*").order("full_name", { ascending: true }),
-    supabase.from("products").select("*").order("name", { ascending: true }),
-    supabase.from("customer_product_prices").select("*"),
-    supabase.from("orders").select("*").order("created_at", { ascending: false }),
-    supabase.from("order_items").select("*").order("created_at", { ascending: true }),
-    supabase.from("order_events").select("*").order("created_at", { ascending: false })
+    supabase.from("dromedario_profiles").select("*").order("full_name", { ascending: true }),
+    supabase.from("dromedario_customers").select("*").order("legal_name", { ascending: true }),
+    supabase.from("dromedario_contacts").select("*").order("full_name", { ascending: true }),
+    supabase.from("dromedario_products").select("*").order("name", { ascending: true }),
+    supabase.from("dromedario_customer_product_prices").select("*"),
+    supabase.from("dromedario_orders").select("*").order("created_at", { ascending: false }),
+    supabase.from("dromedario_order_items").select("*").order("created_at", { ascending: true }),
+    supabase.from("dromedario_order_events").select("*").order("created_at", { ascending: false })
   ]);
 
   const results = [profiles, customers, contacts, products, customerProductPrices, orders, orderItems, events];

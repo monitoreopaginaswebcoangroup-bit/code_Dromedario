@@ -10,7 +10,7 @@ interface CreateUserPayload {
   role?: unknown;
 }
 
-const SUPABASE_DB_SCHEMA = "dromedario";
+const PROFILES_TABLE = "dromedario_profiles";
 const VALID_ROLES: UserRole[] = ["admin", "comercial", "facturacion", "despacho"];
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -43,7 +43,6 @@ serve(async (request) => {
   if (!payload.ok) return jsonError(payload.error, 400);
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey, {
-    db: { schema: SUPABASE_DB_SCHEMA },
     auth: {
       autoRefreshToken: false,
       persistSession: false
@@ -56,7 +55,7 @@ serve(async (request) => {
   }
 
   const { data: currentProfile, error: profileError } = await adminClient
-    .from("profiles")
+    .from(PROFILES_TABLE)
     .select("id, role, active")
     .eq("id", sessionUser.user.id)
     .maybeSingle();
@@ -79,7 +78,7 @@ serve(async (request) => {
   if (!created.user) return jsonError("Supabase no retorno el usuario creado.", 500);
 
   const { data: profile, error: upsertError } = await adminClient
-    .from("profiles")
+    .from(PROFILES_TABLE)
     .upsert({
       id: created.user.id,
       email: payload.value.email,

@@ -37,14 +37,13 @@ Tanto Vercel como Netlify se conectan directo a GitHub para hacer deploy automat
 
 ### 0.3 Preparacion de Supabase (una sola vez, independiente de la plataforma de hosting)
 
-1. Ejecutar `supabase/schema.sql` en el SQL Editor del proyecto Supabase.
-2. En Project Settings > API > Exposed schemas, agregar `dromedario`.
-3. Deploy de la Edge Function:
+1. Ejecutar `supabase/schema.sql` en el SQL Editor del proyecto Supabase. Las tablas quedan en el schema `public` con prefijo `dromedario_*`, asi que no hace falta exponer ningun schema adicional (funciona igual en un proyecto de Supabase directo o en uno administrado por Lovable Cloud, que solo expone `public`).
+2. Deploy de la Edge Function:
    ```bash
    supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
    supabase functions deploy admin-create-user
    ```
-4. Crear el primer admin (ver seccion "Create users" del README) despues de que exista al menos un usuario en Supabase Auth.
+3. Crear el primer admin (ver seccion "Create users" del README) despues de que exista al menos un usuario en Supabase Auth.
 
 ---
 
@@ -112,4 +111,4 @@ Si clonas el repo en otra maquina, repite el `git config` de arriba antes del pr
 - [ ] Crear un pedido de prueba y verificar el flujo de estados.
 - [ ] Adjuntar un archivo y confirmar que el link firmado de Supabase Storage funciona.
 - [ ] Confirmar que `SUPABASE_SERVICE_ROLE_KEY` NO esta en las variables de entorno del hosting (solo como secreto de la Edge Function).
-- [ ] Confirmar que el schema `dromedario` esta expuesto en Supabase (paso 0.3.2).
+- [ ] Confirmar que `supabase/schema.sql` fue ejecutado en este proyecto de Supabase (tablas `dromedario_*` visibles en `public`).

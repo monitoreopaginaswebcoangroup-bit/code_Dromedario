@@ -7,7 +7,7 @@ MVP web para centralizar pedidos recibidos por WhatsApp, llamada o correo, con f
 - Supabase Auth
 - Supabase PostgreSQL with RLS
 - Supabase Storage for order documents
-- Database schema: `dromedario`
+- Database tables: `public` schema, prefixed `dromedario_*` (avoids clashing with other apps/tools sharing the same Supabase project)
 - Deploy target: Vercel or Netlify
 
 ## MVP Scope
@@ -40,13 +40,9 @@ Do not put `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`, Netlify, Vercel or any b
 
 3. Run Supabase schema:
 
-Open Supabase SQL Editor and run `supabase/schema.sql`.
+Open Supabase SQL Editor and run `supabase/schema.sql`. It creates its tables directly in `public` (prefixed `dromedario_*`), so no extra "Exposed schemas" configuration is needed — this also works on Lovable Cloud projects, which only expose `public` through the Data API.
 
-4. Expose the `dromedario` schema:
-
-In Supabase go to Project Settings, API, Exposed schemas and add `dromedario`. Keep `public` only if other tools need it; this MVP reads/writes application tables through `dromedario`.
-
-5. Deploy the admin user Edge Function:
+4. Deploy the admin user Edge Function:
 
 ```bash
 supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
@@ -55,19 +51,19 @@ supabase functions deploy admin-create-user
 
 The service role key must live as a Supabase secret for Edge Functions. It is used only after the function validates that the current logged-in user has an active `admin` profile.
 
-6. Create users:
+5. Create users:
 
 Use Supabase Auth to create accounts, or sign in as an `admin` and create users from Configuracion. New users start as `comercial` unless an admin assigns another role. Valid roles are `admin`, `comercial`, `facturacion`, `despacho`.
 
 For the first admin, run this in Supabase SQL Editor after creating the user:
 
 ```sql
-update dromedario.profiles
+update public.dromedario_profiles
 set role = 'admin'
 where email = 'admin@your-company.com';
 ```
 
-7. Start the app:
+6. Start the app:
 
 ```bash
 npm run dev

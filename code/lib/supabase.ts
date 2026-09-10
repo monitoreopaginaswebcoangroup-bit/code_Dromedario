@@ -2,8 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
-export const SUPABASE_DB_SCHEMA = "dromedario";
-export type DromedarioSupabaseClient = SupabaseClient<any, any, typeof SUPABASE_DB_SCHEMA>;
+export type DromedarioSupabaseClient = SupabaseClient;
 
 let browserClient: DromedarioSupabaseClient | null = null;
 
@@ -20,9 +19,6 @@ export function getSupabaseClient() {
 
   if (!browserClient) {
     browserClient = createClient(supabaseUrl, supabaseAnonKey, {
-      db: {
-        schema: SUPABASE_DB_SCHEMA
-      },
       auth: {
         autoRefreshToken: true,
         persistSession: true
