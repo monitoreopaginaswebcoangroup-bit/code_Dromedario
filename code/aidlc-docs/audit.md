@@ -888,3 +888,27 @@ Mantén un único lenguaje visual en toda la aplicación.
 **Context**: OPERATIONS phase - deployment configuration and documentation for the MVP.
 
 ---
+
+## Production Schema Incompatibility with Lovable Cloud
+**Timestamp**: 2026-09-09T00:00:00Z
+**User Input**: Reported a 404 on the client's Vercel deployment, then after fixing Root Directory, a post-login error "Invalid schema: dromedario" once Supabase (managed via Lovable Cloud) was reached. Confirmed the production Supabase project is administered through Lovable Cloud, which only exposes `public` via the Data API, and is shared with other Lovable-managed functionality (risk of table-name collisions ruled out using `dromedario_` prefixes instead of bare names in `public`).
+**AI Response**: "Rewrote `supabase/schema.sql` to create all objects (tables, functions, triggers, RLS policies, storage bucket) in `public` prefixed `dromedario_*` instead of a dedicated `dromedario` schema. Updated `lib/supabase.ts` and `supabase/functions/admin-create-user/index.ts` accordingly, updated README/DEPLOYMENT docs. Committed and pushed to origin (enterdevsas/dromedario_pedidos) under the required client GitHub identity. Generated a clean zip (excluding .git/node_modules/.next/.env.local) for the user to apply to the client's separately-hosted repo, and drafted the client-facing update email."
+**Context**: OPERATIONS - production incident triage and fix, unrelated to the AI-DLC construction workflow itself.
+
+---
+
+## Configurable Schema (local dev parity)
+**Timestamp**: 2026-09-10T00:00:00Z
+**User Input**: "en mi bd local puedes mantener el esquema de BD y el edge function, pero en produccion es dentro de public, como se podria hacer?"
+**AI Response**: "Made the schema choice runtime-configurable instead of hardcoded: added `NEXT_PUBLIC_SUPABASE_DB_SCHEMA` (frontend) and the `SUPABASE_DB_SCHEMA` secret (Edge Function), defaulting to `public`+`dromedario_` prefix (required for production/Lovable Cloud). Restored the original dedicated-schema design as a separate `supabase/schema.dromedario.sql` for exclusive projects (e.g. local dev), selected via that same env var. Documented both paths in README/supabase/README.md/.env.example."
+**Context**: Follow-up to the schema-portability fix above, so local development is not forced onto the production layout.
+
+---
+
+## R4 Client Meeting Feedback (2026-09-10)
+**Timestamp**: 2026-09-10T00:00:00Z
+**User Input**: "using AI-DCL usa la reunion @code/documentos/meetings/R4_Pruebas_2026-09-10.md para hacer las mejoras indicadas"
+**AI Response**: "Read the R4 meeting transcript (customer support call with Guillermo Del Rio) and extracted 8 concrete requests. Implemented 7 as scoped, well-understood changes without a separate formal Requirements/User Stories ceremony (consistent with how prior small feature increments in this same project were handled - see Verification Results log): (1) sessionStorage draft persistence for 'Nuevo cliente' and 'Nuevo pedido' so navigating away no longer loses unsaved input, (2) an optional 'Solicitado por' (nombre/celular/correo) record on orders, distinct from a formal Contact, (3) an initial attachment field on 'Nuevo pedido' (orden de compra / captura), stored as `orders.source_attachment_path`, (4) confirmed (no code change needed) that Despacho already sees the invoice attachment via the existing storage RLS, (5) admin-only inline edit of an order's Direccion/Fecha solicitada/Observaciones without a status transition, backed by a new always-on admin UPDATE RLS policy, (6) admin-only edit of an existing user's Nombre/Rol/Activo in Configuracion, (7) restricted the Productos module (nav + page + insert/update RLS) to admin only, per the client's explicit statement that only the administrator should have access. Explicitly did NOT implement the 8th request, a granular per-menu-item ACL/custom-role system, because in the transcript itself the response to that request was 'no me comprometo' (not committed to) - logged as a deferred backlog item instead. All DB changes are additive and idempotent (`alter table add column if not exists`, `drop+create policy`) so they are safe to re-run against the already-provisioned production database. `npm run typecheck`, `npm run test`, and `npm run build` passed."
+**Context**: CONSTRUCTION - incremental feature work driven directly by real customer meeting feedback, same adaptive depth used for prior increments in this project (Workflow Planning / Application Design / Units Generation skipped as not warranted: existing component boundaries, no new services).
+
+---

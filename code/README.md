@@ -12,13 +12,17 @@ MVP web para centralizar pedidos recibidos por WhatsApp, llamada o correo, con f
 
 ## MVP Scope
 - Login with Supabase Auth.
-- Roles: `admin`, `comercial`, `facturacion`, `despacho`.
+- Roles: `admin`, `comercial`, `facturacion`, `despacho`, `digitador`.
 - El rol `despacho` prepara el pedido, registra el envio y reporta entrega o novedad.
-- CRUD rapido de clientes, contactos and productos.
-- Registro de pedidos con productos, canal, contacto, asesor and direccion de despacho.
+- El rol `digitador` solo tiene acceso al modulo Clientes (crear/editar clientes, contactos y precios); no ve pedidos, productos, reportes ni configuracion, ni por navegacion ni por URL directa.
+- Cualquier usuario puede actualizar su propio nombre y cambiar su propia contrasena desde "Mi cuenta" en la barra lateral.
+- CRUD rapido de clientes, contactos and productos (Productos es exclusivo de `admin`; los demas roles solo lo usan como catalogo de lectura al armar pedidos).
+- Registro de pedidos con productos, canal, contacto, asesor, direccion de despacho, un campo opcional "Solicitado por" (nombre/celular/correo de quien hizo el pedido, sin crear un contacto formal) y un adjunto inicial (orden de compra o captura).
+- Los formularios de "Nuevo cliente" y "Nuevo pedido" guardan un borrador en `sessionStorage` mientras se diligencian, para no perder datos si el usuario navega a otra pantalla antes de guardar.
+- `admin` puede editar un pedido ya creado (direccion, fecha, observaciones, numero de factura/remision, guia de despacho, sus adjuntos, y las lineas de producto) sin necesidad de mover el pedido de estado; cada cambio queda registrado en la trazabilidad del pedido.
 - Estados: pendiente aprobacion, pendiente facturacion, remitido pendiente factura, pendiente despacho, despachado, entregado, novedad, rechazado and anulado.
 - Los pedidos remitidos pueden pasar a despacho/envio, pero permanecen resaltados como `Factura pendiente` hasta que facturacion registre la factura.
-- Eventos de trazabilidad por accion.
+- Eventos de trazabilidad por accion (incluye ediciones manuales de admin, no solo cambios de estado).
 - Adjuntos privados de factura/remision/guia via Supabase Storage.
 - Dashboard con pedidos activos, historicos and metricas simples de impacto.
 
@@ -57,7 +61,7 @@ If you ran the `dromedario` schema variant, also set `supabase secrets set SUPAB
 
 5. Create users:
 
-Use Supabase Auth to create accounts, or sign in as an `admin` and create users from Configuracion. New users start as `comercial` unless an admin assigns another role. Valid roles are `admin`, `comercial`, `facturacion`, `despacho`.
+Use Supabase Auth to create accounts, or sign in as an `admin` and create/edit users from Configuracion. New users start as `comercial` unless an admin assigns another role. Valid roles are `admin`, `comercial`, `facturacion`, `despacho`, `digitador`.
 
 For the first admin, run this in Supabase SQL Editor after creating the user:
 
