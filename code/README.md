@@ -40,7 +40,9 @@ Do not put `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`, Netlify, Vercel or any b
 
 3. Run Supabase schema:
 
-Open Supabase SQL Editor and run `supabase/schema.sql`. It creates its tables directly in `public` (prefixed `dromedario_*`), so no extra "Exposed schemas" configuration is needed — this also works on Lovable Cloud projects, which only expose `public` through the Data API.
+Open Supabase SQL Editor and run `supabase/schema.sql`. It creates its tables directly in `public` (prefixed `dromedario_*`), so no extra "Exposed schemas" configuration is needed — this also works on Lovable Cloud projects, which only expose `public` through the Data API. **Use this variant for production and for any project shared with other apps.**
+
+Only if you have a Supabase project dedicated exclusively to this app (e.g. personal local dev), you may instead run `supabase/schema.dromedario.sql`, expose the `dromedario` schema in Project Settings > API, and set `NEXT_PUBLIC_SUPABASE_DB_SCHEMA=dromedario` in `.env.local`. Do not mix variants on the same project.
 
 4. Deploy the admin user Edge Function:
 
@@ -50,6 +52,8 @@ supabase functions deploy admin-create-user
 ```
 
 The service role key must live as a Supabase secret for Edge Functions. It is used only after the function validates that the current logged-in user has an active `admin` profile.
+
+If you ran the `dromedario` schema variant, also set `supabase secrets set SUPABASE_DB_SCHEMA=dromedario` so the Edge Function reads/writes the same tables as the app. Leave it unset for the `public`/prefixed variant.
 
 5. Create users:
 

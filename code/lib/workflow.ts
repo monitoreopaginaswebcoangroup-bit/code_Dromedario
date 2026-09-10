@@ -27,14 +27,16 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   admin: "Admin/Gerencia",
   comercial: "Comercial",
   facturacion: "Facturacion",
-  despacho: "Despacho / envios"
+  despacho: "Despacho / envios",
+  digitador: "Digitador"
 };
 
 export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   admin: "Autoriza pedidos, administra datos y supervisa la operacion.",
   comercial: "Registra pedidos y gestiona clientes asignados.",
   facturacion: "Factura, adjunta documentos y libera pedidos para despacho.",
-  despacho: "Prepara pedidos, registra el envio y reporta entrega o novedad."
+  despacho: "Prepara pedidos, registra el envio y reporta entrega o novedad.",
+  digitador: "Registra y actualiza clientes y contactos. Sin acceso a pedidos, productos ni reportes."
 };
 
 export const STATUS_LABELS: Record<OrderStatus, string> = {
@@ -187,6 +189,10 @@ export function isActiveStatus(status: OrderStatus) {
 
 export function canCreateOrderForRole(role: UserRole) {
   return role === "admin" || role === "comercial";
+}
+
+export function canManageProductsForRole(role: UserRole) {
+  return role === "admin";
 }
 
 export function isOrderVisibleForRole({

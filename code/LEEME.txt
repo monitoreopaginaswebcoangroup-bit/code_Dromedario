@@ -1,0 +1,65 @@
+DROMEDARIO PEDIDOS MVP — Paquete de actualizacion (2026-09-10)
+================================================================
+
+Este paquete NO es el proyecto completo. Contiene unicamente los archivos que
+cambiaron y hay que reemplazar en el repositorio, mas el script SQL que hay
+que correr en Supabase.
+
+1) BASE DE DATOS (hacer esto primero)
+--------------------------------------
+Abre el SQL Editor de Supabase (Lovable Cloud) del proyecto y corre COMPLETO
+el archivo:
+
+    supabase/migrations/2026-09-10-r4-digitador.sql
+
+Es seguro volver a correrlo si ya lo corriste antes (no duplica nada).
+
+2) CODIGO — reemplazar estos archivos en el repositorio
+---------------------------------------------------------
+Copia cada archivo de este paquete a la MISMA ruta dentro del repositorio,
+sobrescribiendo el que ya existe:
+
+    app/globals.css
+    components/mvp-app.tsx
+    lib/supabase.ts
+    lib/workflow.ts
+    types/domain.ts
+    supabase/functions/admin-create-user/index.ts
+    supabase/schema.sql
+    supabase/schema.dromedario.sql   (nuevo archivo, solo referencia para ambientes de desarrollo dedicados)
+    supabase/README.md
+    README.md
+    .env.example
+
+Las variables de entorno en Vercel (NEXT_PUBLIC_SUPABASE_URL,
+NEXT_PUBLIC_SUPABASE_ANON_KEY) NO cambian.
+
+3) EDGE FUNCTION — volver a desplegar aparte
+-----------------------------------------------
+El archivo supabase/functions/admin-create-user/index.ts es codigo de una
+Supabase Edge Function. Reemplazar el archivo en el repo NO la actualiza
+automaticamente: hay que volver a desplegarla.
+
+Con la Supabase CLI:
+
+    supabase login
+    supabase link --project-ref <ref-del-proyecto>
+    supabase functions deploy admin-create-user
+
+O desde la seccion "Edge functions" del panel de Lovable Cloud, si permite
+resincronizar/redesplegar desde ahi.
+
+4) SUBIR EL CODIGO Y REDESPLEGAR EL FRONTEND
+-----------------------------------------------
+Haz commit y push de los archivos reemplazados al repositorio conectado a
+Vercel. El despliegue del frontend se dispara solo; si no, entra a Vercel →
+Deployments → Redeploy.
+
+5) VERIFICAR
+--------------
+- Inicia sesion.
+- Crea un pedido de prueba (con "Solicitado por" y un adjunto inicial).
+- Como admin, entra a un pedido y prueba "Editar" (direccion, factura,
+  lineas de producto).
+- Crea un usuario con rol Digitador y confirma que solo ve Clientes.
+- Desde "Mi cuenta" (barra lateral), cambia tu nombre y tu contrasena.

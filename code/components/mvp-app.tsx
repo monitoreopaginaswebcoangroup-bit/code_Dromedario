@@ -1,16 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { usePathname } from "next/navigation";
 import { formatDate, formatDateTime, formatMoney, sanitizeFileName } from "@/lib/format";
-import { getSupabaseClient, isSupabaseConfigured, type DromedarioSupabaseClient } from "@/lib/supabase";
+import {
+  getSupabaseClient,
+  isSupabaseConfigured,
+  dromedarioTable,
+  ORDER_DOCUMENTS_BUCKET,
+  type DromedarioSupabaseClient
+} from "@/lib/supabase";
 import {
   ROLE_DESCRIPTIONS,
   ROLE_LABELS,
   STATUS_LABELS,
   TRANSITIONS,
   canCreateOrderForRole,
+  canManageProductsForRole,
   estimateMinutesSaved,
   getAvailableTransitions,
   isActiveStatus,
@@ -32,6 +39,13 @@ interface OrderDraftItem {
   unit_price: number;
 }
 
+interface EditableOrderItem {
+  id: string | null;
+  product_id: string;
+  quantity: number;
+  unit_price: number;
+}
+
 interface OrderDraft {
   customer_id: string;
   contact_id: string | null;
@@ -40,8 +54,25 @@ interface OrderDraft {
   delivery_address: string;
   requested_delivery_date: string | null;
   source_message: string;
+  requested_by_name: string;
+  requested_by_phone: string;
+  requested_by_email: string;
   notes: string;
   items: OrderDraftItem[];
+}
+
+interface OrderFieldsUpdate {
+  delivery_address: string | null;
+  requested_delivery_date: string | null;
+  notes: string | null;
+  invoice_number: string | null;
+  remission_number: string | null;
+  dispatch_guide: string | null;
+}
+
+interface OrderFieldsUpdateFiles {
+  invoiceFile: File | null;
+  dispatchFile: File | null;
 }
 
 interface TransitionExtras {
@@ -87,7 +118,7 @@ const EMPTY_DATA: AppData = {
 };
 
 const PAGE_SIZE = 8;
-const ROLE_OPTIONS: UserRole[] = ["admin", "comercial", "facturacion", "despacho"];
+const ROLE_OPTIONS: UserRole[] = ["admin", "comercial", "facturacion", "despacho", "digitador"];
 const VIEW_PATHS: Record<View, string> = {
   dashboard: "/resumen",
   orders: "/pedidos",
@@ -97,6 +128,39 @@ const VIEW_PATHS: Record<View, string> = {
   reports: "/reportes",
   settings: "/configuracion"
 };
+
+const DRAFT_KEYS = {
+  newCustomer: "dromedario-draft-new-customer",
+  newOrder: "dromedario-draft-new-order"
+} as const;
+
+function readDraft(key: string): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDraft(key: string, values: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(values));
+  } catch {
+    // Ignore storage errors (private mode, quota, etc.) - draft persistence is best-effort.
+  }
+}
+
+function clearDraft(key: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(key);
+  } catch {
+    // Ignore storage errors.
+  }
+}
 
 const ORDER_FLOW_STEPS: Array<{
   key: string;
@@ -181,7 +245,9 @@ export function MvpApp() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [ordersQuickFilter, setOrdersQuickFilter] = useState<string | null>(null);
+  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const bootstrappedUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -197,6 +263,7 @@ export function MvpApp() {
       if (authData.session) {
         void bootstrapUser(supabase, authData.session).then(({ profile: loadedProfile, appData }) => {
           if (!mounted) return;
+          bootstrappedUserIdRef.current = authData.session!.user.id;
           setBootstrapError(null);
           setProfile(loadedProfile);
           setData(appData);
@@ -213,22 +280,33 @@ export function MvpApp() {
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
-      if (nextSession) {
-        setLoading(true);
-        void bootstrapUser(supabase, nextSession).then(({ profile: loadedProfile, appData }) => {
-          setBootstrapError(null);
-          setProfile(loadedProfile);
-          setData(appData);
-          setLoading(false);
-        }).catch((error: unknown) => {
-          setBootstrapError(getErrorMessage(error));
-          setLoading(false);
-        });
-      } else {
+
+      if (!nextSession) {
+        bootstrappedUserIdRef.current = null;
         setProfile(null);
         setData(EMPTY_DATA);
         setBootstrapError(null);
+        return;
       }
+
+      if (nextSession.user.id === bootstrappedUserIdRef.current) {
+        // Same user as before - this fires on token refresh or when the tab regains
+        // focus. Just keep the fresh session token; do not blow away the current
+        // screen (open drawers, in-progress forms) with a full reload.
+        return;
+      }
+
+      setLoading(true);
+      void bootstrapUser(supabase, nextSession).then(({ profile: loadedProfile, appData }) => {
+        bootstrappedUserIdRef.current = nextSession.user.id;
+        setBootstrapError(null);
+        setProfile(loadedProfile);
+        setData(appData);
+        setLoading(false);
+      }).catch((error: unknown) => {
+        setBootstrapError(getErrorMessage(error));
+        setLoading(false);
+      });
     });
 
     return () => {
@@ -252,8 +330,21 @@ export function MvpApp() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  useEffect(() => {
+    if (profile?.role !== "digitador") return;
+    const customersPath = VIEW_PATHS.customers;
+    if (routePath !== customersPath) {
+      window.history.replaceState(null, "", customersPath);
+      setRoutePath(customersPath);
+    }
+  }, [profile?.role, routePath]);
+
   const maps = useMemo(() => createLookups(data), [data]);
-  const view = getViewFromPathname(routePath);
+  const rawView = getViewFromPathname(routePath);
+  // "digitador" only ever sees Clientes, regardless of the URL typed, a stale
+  // link, or browser back/forward - enforced here so it can't be bypassed by
+  // navigation, not just by hiding the sidebar link.
+  const view: View = profile?.role === "digitador" ? "customers" : rawView;
   const sectionMeta = getSectionMeta(view);
   const canCreateOrders = profile ? canCreateOrderForRole(profile.role) : false;
 
@@ -270,6 +361,7 @@ export function MvpApp() {
     setLoading(true);
     void bootstrapUser(supabase, session)
       .then(({ profile: loadedProfile, appData }) => {
+        bootstrappedUserIdRef.current = session.user.id;
         setProfile(loadedProfile);
         setData(appData);
         setLoading(false);
@@ -292,38 +384,38 @@ export function MvpApp() {
 
   async function createCustomer(payload: Partial<Customer>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("dromedario_customers").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from(dromedarioTable("customers")).insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function createContact(payload: Partial<Contact>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("dromedario_contacts").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from(dromedarioTable("contacts")).insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function updateContact(id: string, payload: Partial<Contact>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("dromedario_contacts").update(payload).eq("id", id);
+    const { error } = await supabase.from(dromedarioTable("contacts")).update(payload).eq("id", id);
     if (error) throw error;
   }
 
   async function createProduct(payload: Partial<Product>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("dromedario_products").insert({ ...payload, created_by: profile.id });
+    const { error } = await supabase.from(dromedarioTable("products")).insert({ ...payload, created_by: profile.id });
     if (error) throw error;
   }
 
   async function updateProduct(id: string, payload: Partial<Product>) {
     if (!supabase || !profile) return;
-    const { error } = await supabase.from("dromedario_products").update(payload).eq("id", id);
+    const { error } = await supabase.from(dromedarioTable("products")).update(payload).eq("id", id);
     if (error) throw error;
   }
 
   async function setCustomerProductPrice(customerId: string, productId: string, price: number) {
     if (!supabase || !profile) return;
     const { error } = await supabase
-      .from("dromedario_customer_product_prices")
+      .from(dromedarioTable("customer_product_prices"))
       .upsert({ customer_id: customerId, product_id: productId, price, created_by: profile.id }, { onConflict: "customer_id,product_id" });
     if (error) throw error;
   }
@@ -346,12 +438,12 @@ export function MvpApp() {
     }
   }
 
-  async function createOrder(draft: OrderDraft) {
+  async function createOrder(draft: OrderDraft, attachment: File | null) {
     if (!supabase || !profile) return;
     if (!canCreateOrderForRole(profile.role)) throw new Error("Tu rol no puede crear pedidos.");
 
     const { data: order, error: orderError } = await supabase
-      .from("dromedario_orders")
+      .from(dromedarioTable("orders"))
       .insert({
         status: "pending_approval",
         customer_id: draft.customer_id,
@@ -362,6 +454,9 @@ export function MvpApp() {
         delivery_address: draft.delivery_address || null,
         requested_delivery_date: draft.requested_delivery_date || null,
         source_message: draft.source_message || null,
+        requested_by_name: draft.requested_by_name || null,
+        requested_by_phone: draft.requested_by_phone || null,
+        requested_by_email: draft.requested_by_email || null,
         notes: draft.notes || null
       })
       .select("*")
@@ -380,10 +475,21 @@ export function MvpApp() {
       };
     });
 
-    const { error: itemsError } = await supabase.from("dromedario_order_items").insert(items);
+    const { error: itemsError } = await supabase.from(dromedarioTable("order_items")).insert(items);
     if (itemsError) throw itemsError;
 
-    const { error: eventError } = await supabase.from("dromedario_order_events").insert({
+    if (attachment) {
+      const path = await uploadOrderFile(order.id, attachment);
+      if (path) {
+        const { error: attachmentError } = await supabase
+          .from(dromedarioTable("orders"))
+          .update({ source_attachment_path: path })
+          .eq("id", order.id);
+        if (attachmentError) throw attachmentError;
+      }
+    }
+
+    const { error: eventError } = await supabase.from(dromedarioTable("order_events")).insert({
       order_id: order.id,
       from_status: null,
       to_status: "pending_approval",
@@ -395,10 +501,144 @@ export function MvpApp() {
     if (eventError) throw eventError;
   }
 
+  async function updateOrderFields(
+    orderId: string,
+    payload: OrderFieldsUpdate,
+    files: OrderFieldsUpdateFiles,
+    editedItems: EditableOrderItem[]
+  ) {
+    if (!supabase || !profile) return;
+    const order = data.orders.find((candidate) => candidate.id === orderId);
+    if (!order) return;
+
+    const update: Partial<Order> = { ...payload };
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+
+    (Object.keys(payload) as Array<keyof OrderFieldsUpdate>).forEach((key) => {
+      if (payload[key] !== (order[key] ?? null)) {
+        changes[key] = { from: order[key], to: payload[key] };
+      }
+    });
+
+    if (files.invoiceFile) {
+      const path = await uploadOrderFile(orderId, files.invoiceFile);
+      if (path) {
+        update.invoice_file_path = path;
+        changes.invoice_file_path = { from: order.invoice_file_path, to: path };
+      }
+    }
+
+    if (files.dispatchFile) {
+      const path = await uploadOrderFile(orderId, files.dispatchFile);
+      if (path) {
+        update.dispatch_file_path = path;
+        changes.dispatch_file_path = { from: order.dispatch_file_path, to: path };
+      }
+    }
+
+    const currentItems = data.orderItems.filter((item) => item.order_id === orderId);
+    const keptIds = new Set(editedItems.filter((item) => item.id).map((item) => item.id));
+    const toDelete = currentItems.filter((item) => !keptIds.has(item.id));
+    const toUpdate: Array<{ id: string; product_id: string; product_name: string; quantity: number; unit_price: number }> = [];
+    const toInsert: Array<{ product_id: string; product_name: string; quantity: number; unit_price: number }> = [];
+    const itemChangeNotes: string[] = [];
+
+    for (const edited of editedItems) {
+      if (!edited.product_id || edited.quantity <= 0) continue;
+      const product = data.products.find((candidate) => candidate.id === edited.product_id);
+      const productName = product?.name ?? "Producto no definido";
+
+      if (edited.id) {
+        const original = currentItems.find((item) => item.id === edited.id);
+        if (!original) continue;
+        const changed =
+          original.product_id !== edited.product_id ||
+          Number(original.quantity) !== Number(edited.quantity) ||
+          Number(original.unit_price) !== Number(edited.unit_price);
+        if (changed) {
+          toUpdate.push({ id: edited.id, product_id: edited.product_id, product_name: productName, quantity: edited.quantity, unit_price: edited.unit_price });
+          itemChangeNotes.push(
+            `${original.product_name}${original.product_name !== productName ? ` -> ${productName}` : ""}: cantidad ${original.quantity} -> ${edited.quantity}, precio ${formatMoney(original.unit_price)} -> ${formatMoney(edited.unit_price)}`
+          );
+        }
+      } else {
+        toInsert.push({ product_id: edited.product_id, product_name: productName, quantity: edited.quantity, unit_price: edited.unit_price });
+        itemChangeNotes.push(`Agregado: ${productName} (${edited.quantity} x ${formatMoney(edited.unit_price)})`);
+      }
+    }
+
+    for (const removed of toDelete) {
+      itemChangeNotes.push(`Eliminado: ${removed.product_name} (${removed.quantity} x ${formatMoney(removed.unit_price)})`);
+    }
+
+    const hasFieldChanges = Object.keys(changes).length > 0;
+    const hasItemChanges = toDelete.length > 0 || toUpdate.length > 0 || toInsert.length > 0;
+    if (!hasFieldChanges && !hasItemChanges) return;
+
+    if (hasFieldChanges) {
+      const { error: updateError } = await supabase.from(dromedarioTable("orders")).update(update).eq("id", orderId);
+      if (updateError) throw updateError;
+    }
+
+    if (toDelete.length > 0) {
+      const { error: deleteError } = await supabase
+        .from(dromedarioTable("order_items"))
+        .delete()
+        .in("id", toDelete.map((item) => item.id));
+      if (deleteError) throw deleteError;
+    }
+
+    for (const item of toUpdate) {
+      const { error: itemUpdateError } = await supabase
+        .from(dromedarioTable("order_items"))
+        .update({ product_id: item.product_id, product_name: item.product_name, quantity: item.quantity, unit_price: item.unit_price })
+        .eq("id", item.id);
+      if (itemUpdateError) throw itemUpdateError;
+    }
+
+    if (toInsert.length > 0) {
+      const { error: insertError } = await supabase
+        .from(dromedarioTable("order_items"))
+        .insert(toInsert.map((item) => ({ ...item, order_id: orderId })));
+      if (insertError) throw insertError;
+    }
+
+    const notes = [hasFieldChanges ? describeOrderFieldChanges(changes) : null, ...itemChangeNotes].filter(Boolean).join("; ");
+
+    const { error: eventError } = await supabase.from(dromedarioTable("order_events")).insert({
+      order_id: orderId,
+      from_status: null,
+      to_status: null,
+      action: "edited",
+      notes,
+      metadata: { fieldChanges: changes, itemChanges: itemChangeNotes },
+      created_by: profile.id
+    });
+    if (eventError) throw eventError;
+  }
+
+  async function updateProfile(id: string, payload: Partial<Profile>) {
+    if (!supabase || !profile) return;
+    const { error } = await supabase.from(dromedarioTable("profiles")).update(payload).eq("id", id);
+    if (error) throw error;
+  }
+
+  async function updateOwnName(fullName: string) {
+    if (!supabase || !profile) return;
+    const { error } = await supabase.from(dromedarioTable("profiles")).update({ full_name: fullName }).eq("id", profile.id);
+    if (error) throw error;
+  }
+
+  async function changeOwnPassword(newPassword: string) {
+    if (!supabase) return;
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+  }
+
   async function uploadOrderFile(orderId: string, file: File) {
     if (!supabase) return null;
     const path = `${orderId}/${Date.now()}-${sanitizeFileName(file.name)}`;
-    const { error } = await supabase.storage.from("dromedario-order-documents").upload(path, file, {
+    const { error } = await supabase.storage.from(ORDER_DOCUMENTS_BUCKET).upload(path, file, {
       cacheControl: "3600",
       upsert: false
     });
@@ -461,10 +701,10 @@ export function MvpApp() {
       metadata.reason = extras.note;
     }
 
-    const { error: updateError } = await supabase.from("dromedario_orders").update(update).eq("id", order.id);
+    const { error: updateError } = await supabase.from(dromedarioTable("orders")).update(update).eq("id", order.id);
     if (updateError) throw updateError;
 
-    const { error: eventError } = await supabase.from("dromedario_order_events").insert({
+    const { error: eventError } = await supabase.from(dromedarioTable("order_events")).insert({
       order_id: order.id,
       from_status: order.status,
       to_status: update.status ?? transition.to,
@@ -478,7 +718,7 @@ export function MvpApp() {
 
   async function openAttachment(path: string) {
     if (!supabase) return;
-    const { data: signed, error } = await supabase.storage.from("dromedario-order-documents").createSignedUrl(path, 120);
+    const { data: signed, error } = await supabase.storage.from(ORDER_DOCUMENTS_BUCKET).createSignedUrl(path, 120);
     if (error) {
       setFeedback({ type: "error", text: error.message });
       return;
@@ -525,6 +765,7 @@ export function MvpApp() {
   }
 
   return (
+    <>
     <AppShell
       view={view}
       profile={profile}
@@ -535,6 +776,7 @@ export function MvpApp() {
       onCloseMobile={() => setMobileSidebarOpen(false)}
       onNavigate={navigate}
       onSignOut={() => void supabase.auth.signOut()}
+      onOpenProfile={() => setProfileDrawerOpen(true)}
     >
       <Topbar
         title={sectionMeta.title}
@@ -564,6 +806,7 @@ export function MvpApp() {
               runMutation(() => transitionOrder(order, transition, extras), `Pedido ${order.id.slice(0, 8)} actualizado.`)
             }
             onOpenAttachment={(path) => void openAttachment(path)}
+            onUpdateOrder={(id, payload, files, editedItems) => runMutation(() => updateOrderFields(id, payload, files, editedItems), "Pedido actualizado.")}
             onNavigateToOrders={goToOrdersWithFilter}
           />
         )}
@@ -580,6 +823,7 @@ export function MvpApp() {
               runMutation(() => transitionOrder(order, transition, extras), `Pedido ${order.id.slice(0, 8)} actualizado.`)
             }
             onOpenAttachment={(path) => void openAttachment(path)}
+            onUpdateOrder={(id, payload, files, editedItems) => runMutation(() => updateOrderFields(id, payload, files, editedItems), "Pedido actualizado.")}
           />
         )}
 
@@ -588,7 +832,7 @@ export function MvpApp() {
             <OrderForm
               data={data}
               profile={profile}
-              onCreate={(draft) => runMutation(() => createOrder(draft), "Pedido registrado y enviado a aprobacion.")}
+              onCreate={(draft, attachment) => runMutation(() => createOrder(draft, attachment), "Pedido registrado y enviado a aprobacion.")}
               onCancel={() => navigate("dashboard")}
               isPending={isPending}
             />
@@ -618,13 +862,22 @@ export function MvpApp() {
         )}
 
         {view === "products" && (
-          <ProductPanel
-            products={data.products}
-            searchQuery={searchQuery}
-            onCreateProduct={(payload) => runMutation(() => createProduct(payload), "Producto creado.")}
-            onUpdateProduct={(id, payload) => runMutation(() => updateProduct(id, payload), "Producto actualizado.")}
-            isPending={isPending}
-          />
+          canManageProductsForRole(profile.role) ? (
+            <ProductPanel
+              products={data.products}
+              searchQuery={searchQuery}
+              onCreateProduct={(payload) => runMutation(() => createProduct(payload), "Producto creado.")}
+              onUpdateProduct={(id, payload) => runMutation(() => updateProduct(id, payload), "Producto actualizado.")}
+              isPending={isPending}
+            />
+          ) : (
+            <RoleBlockedPage
+              title="Productos no disponible"
+              text="El catalogo de productos esta reservado para Admin/Gerencia."
+              actionLabel="Volver al resumen"
+              onAction={() => navigate("dashboard")}
+            />
+          )
         )}
 
         {view === "reports" && (
@@ -637,11 +890,22 @@ export function MvpApp() {
             profile={profile}
             searchQuery={searchQuery}
             onCreateUser={(payload) => runMutation(() => createUser(payload), "Usuario creado y perfil asignado.")}
+            onUpdateProfile={(id, payload) => runMutation(() => updateProfile(id, payload), "Usuario actualizado.")}
             isPending={isPending}
           />
         )}
       </main>
     </AppShell>
+
+    <MyProfileDrawer
+      profile={profile}
+      open={profileDrawerOpen}
+      isPending={isPending}
+      onClose={() => setProfileDrawerOpen(false)}
+      onUpdateName={(fullName) => runMutation(() => updateOwnName(fullName), "Nombre actualizado.")}
+      onChangePassword={(newPassword) => runMutation(() => changeOwnPassword(newPassword), "Contrasena actualizada.")}
+    />
+    </>
   );
 }
 
@@ -655,6 +919,7 @@ function AppShell({
   onCloseMobile,
   onNavigate,
   onSignOut,
+  onOpenProfile,
   children
 }: {
   view: View;
@@ -666,6 +931,7 @@ function AppShell({
   onCloseMobile: () => void;
   onNavigate: (view: View) => void;
   onSignOut: () => void;
+  onOpenProfile: () => void;
   children: React.ReactNode;
 }) {
   return (
@@ -679,6 +945,7 @@ function AppShell({
         onToggleMobile={onToggleMobile}
         onNavigate={onNavigate}
         onSignOut={onSignOut}
+        onOpenProfile={onOpenProfile}
       />
       <div className="shell-main">{children}</div>
     </div>
@@ -692,7 +959,8 @@ function Sidebar({
   onToggleCollapsed,
   onToggleMobile,
   onNavigate,
-  onSignOut
+  onSignOut,
+  onOpenProfile
 }: {
   view: View;
   profile: Profile;
@@ -701,6 +969,7 @@ function Sidebar({
   onToggleMobile: () => void;
   onNavigate: (view: View) => void;
   onSignOut: () => void;
+  onOpenProfile: () => void;
 }) {
   const navItems: Array<{ label: string; view: View; short: string }> = [
     { label: "Resumen", view: "dashboard", short: "RS" },
@@ -709,11 +978,19 @@ function Sidebar({
     { label: "Clientes", view: "customers", short: "CL" },
     { label: "Productos", view: "products", short: "PR" }
   ];
-  const visibleNavItems = navItems.filter((item) => item.view !== "new-order" || canCreateOrderForRole(profile.role));
-  const secondaryItems: Array<{ label: string; view: View; short: string }> = [
-    { label: "Reportes / metricas", view: "reports", short: "RM" },
-    { label: "Configuracion", view: "settings", short: "CF" }
-  ];
+  const visibleNavItems = navItems.filter((item) => {
+    if (profile.role === "digitador") return item.view === "customers";
+    if (item.view === "new-order") return canCreateOrderForRole(profile.role);
+    if (item.view === "products") return canManageProductsForRole(profile.role);
+    return true;
+  });
+  const secondaryItems: Array<{ label: string; view: View; short: string }> =
+    profile.role === "digitador"
+      ? []
+      : [
+          { label: "Reportes / metricas", view: "reports", short: "RM" },
+          { label: "Configuracion", view: "settings", short: "CF" }
+        ];
 
   return (
     <aside className="sidebar" aria-label="Navegacion principal">
@@ -772,11 +1049,91 @@ function Sidebar({
             <span>{ROLE_DESCRIPTIONS[profile.role]}</span>
           </div>
         </div>
+        <button className="button-ghost" type="button" onClick={onOpenProfile}>
+          Mi cuenta
+        </button>
         <button className="button-ghost sidebar-signout" data-testid="session-sign-out-button" type="button" onClick={onSignOut}>
           Cerrar sesion
         </button>
       </div>
     </aside>
+  );
+}
+
+function MyProfileDrawer({
+  profile,
+  open,
+  isPending,
+  onClose,
+  onUpdateName,
+  onChangePassword
+}: {
+  profile: Profile;
+  open: boolean;
+  isPending: boolean;
+  onClose: () => void;
+  onUpdateName: (fullName: string) => void;
+  onChangePassword: (password: string) => void;
+}) {
+  const [fullName, setFullName] = useState(profile.full_name);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) setFullName(profile.full_name);
+  }, [open, profile.full_name]);
+
+  function submitName(event: React.FormEvent) {
+    event.preventDefault();
+    if (!fullName.trim()) return;
+    onUpdateName(fullName.trim());
+  }
+
+  function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    if (password.length < 6) {
+      setPasswordError("La contrasena debe tener minimo 6 caracteres.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setPasswordError("Las contrasenas no coinciden.");
+      return;
+    }
+    setPasswordError(null);
+    onChangePassword(password);
+    setPassword("");
+    setConfirmPassword("");
+  }
+
+  return (
+    <Drawer title="Mi cuenta" open={open} onClose={onClose}>
+      <div className="drawer-form">
+        <p className="muted">Correo: {profile.email}</p>
+        <p className="muted">Rol: {ROLE_LABELS[profile.role]}</p>
+      </div>
+
+      <form className="drawer-form" onSubmit={submitName}>
+        <label>Nombre completo<input value={fullName} onChange={(event) => setFullName(event.target.value)} required data-testid="own-profile-name-input" /></label>
+        <div className="drawer-actions">
+          <button className="button button-small" disabled={isPending} data-testid="own-profile-name-submit">Guardar nombre</button>
+        </div>
+      </form>
+
+      <form className="drawer-form" onSubmit={submitPassword}>
+        <p className="muted">Cambiar contrasena</p>
+        <label>Nueva contrasena<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={6} required data-testid="own-profile-password-input" /></label>
+        <label>Confirmar contrasena<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={6} required data-testid="own-profile-password-confirm-input" /></label>
+        {passwordError && <div className="notice error">{passwordError}</div>}
+        <div className="drawer-actions">
+          <button className="button button-small" disabled={isPending} data-testid="own-profile-password-submit">Cambiar contrasena</button>
+        </div>
+      </form>
+
+      <div className="drawer-actions">
+        <button className="button-ghost" type="button" onClick={onClose}>Cerrar</button>
+      </div>
+    </Drawer>
   );
 }
 
@@ -956,6 +1313,7 @@ function Dashboard({
   isPending,
   onTransition,
   onOpenAttachment,
+  onUpdateOrder,
   onNavigateToOrders
 }: {
   data: AppData;
@@ -965,6 +1323,7 @@ function Dashboard({
   isPending: boolean;
   onTransition: (order: Order, transition: TransitionDefinition, extras: TransitionExtras) => void;
   onOpenAttachment: (path: string) => void;
+  onUpdateOrder: (orderId: string, payload: OrderFieldsUpdate, files: OrderFieldsUpdateFiles, editedItems: EditableOrderItem[]) => void;
   onNavigateToOrders: (quickFilter: string) => void;
 }) {
   const activeOrders = data.orders.filter((order) => isActiveStatus(order.status) || hasPendingRemissionInvoice(order));
@@ -1000,6 +1359,7 @@ function Dashboard({
         isPending={isPending}
         onTransition={onTransition}
         onOpenAttachment={onOpenAttachment}
+        onUpdateOrder={onUpdateOrder}
         emptyText="No hay pedidos activos visibles para tu rol."
       />
     </div>
@@ -1014,7 +1374,8 @@ function OrdersPage({
   isPending,
   initialQuickFilter,
   onTransition,
-  onOpenAttachment
+  onOpenAttachment,
+  onUpdateOrder
 }: {
   data: AppData;
   profile: Profile;
@@ -1024,6 +1385,7 @@ function OrdersPage({
   initialQuickFilter: string | null;
   onTransition: (order: Order, transition: TransitionDefinition, extras: TransitionExtras) => void;
   onOpenAttachment: (path: string) => void;
+  onUpdateOrder: (orderId: string, payload: OrderFieldsUpdate, files: OrderFieldsUpdateFiles, editedItems: EditableOrderItem[]) => void;
 }) {
   return (
     <div className="page-stack">
@@ -1044,6 +1406,7 @@ function OrdersPage({
         initialQuickFilter={initialQuickFilter}
         onTransition={onTransition}
         onOpenAttachment={onOpenAttachment}
+        onUpdateOrder={onUpdateOrder}
         emptyText="No hay pedidos visibles para los filtros seleccionados."
       />
     </div>
@@ -1062,6 +1425,7 @@ function OrderTable({
   initialQuickFilter,
   onTransition,
   onOpenAttachment,
+  onUpdateOrder,
   emptyText
 }: {
   title: string;
@@ -1075,6 +1439,7 @@ function OrderTable({
   initialQuickFilter?: string | null;
   onTransition: (order: Order, transition: TransitionDefinition, extras: TransitionExtras) => void;
   onOpenAttachment: (path: string) => void;
+  onUpdateOrder: (orderId: string, payload: OrderFieldsUpdate, files: OrderFieldsUpdateFiles, editedItems: EditableOrderItem[]) => void;
   emptyText: string;
 }) {
   const [statusFilter, setStatusFilter] = useState(initialQuickFilter ?? "all");
@@ -1244,11 +1609,13 @@ function OrderTable({
                           salesperson={salesperson}
                           creator={creator}
                           items={items}
+                          products={data.products}
                           events={events}
                           isPending={isPending}
                           readOnly={!canManageOrder}
                           onTransition={onTransition}
                           onOpenAttachment={onOpenAttachment}
+                          onUpdateOrder={onUpdateOrder}
                         />
                       </td>
                     </tr>
@@ -1290,23 +1657,46 @@ function OrderForm({
 }: {
   data: AppData;
   profile: Profile;
-  onCreate: (draft: OrderDraft) => void;
+  onCreate: (draft: OrderDraft, attachment: File | null) => void;
   onCancel: () => void;
   isPending: boolean;
 }) {
-  const [customerId, setCustomerId] = useState("");
-  const [contactId, setContactId] = useState("");
-  const [channel, setChannel] = useState<SalesChannel>("whatsapp");
-  const [assignedSalespersonId, setAssignedSalespersonId] = useState(profile.role === "comercial" ? profile.id : "");
-  const [deliveryAddress, setDeliveryAddress] = useState("");
-  const [requestedDeliveryDate, setRequestedDeliveryDate] = useState("");
-  const [sourceMessage, setSourceMessage] = useState("");
-  const [notes, setNotes] = useState("");
+  const savedDraft = useMemo(() => readDraft(DRAFT_KEYS.newOrder), []);
+  const [customerId, setCustomerId] = useState(savedDraft.customerId ?? "");
+  const [contactId, setContactId] = useState(savedDraft.contactId ?? "");
+  const [channel, setChannel] = useState<SalesChannel>((savedDraft.channel as SalesChannel) || "whatsapp");
+  const [assignedSalespersonId, setAssignedSalespersonId] = useState(
+    savedDraft.assignedSalespersonId ?? (profile.role === "comercial" ? profile.id : "")
+  );
+  const [deliveryAddress, setDeliveryAddress] = useState(savedDraft.deliveryAddress ?? "");
+  const [requestedDeliveryDate, setRequestedDeliveryDate] = useState(savedDraft.requestedDeliveryDate ?? "");
+  const [sourceMessage, setSourceMessage] = useState(savedDraft.sourceMessage ?? "");
+  const [requestedByName, setRequestedByName] = useState(savedDraft.requestedByName ?? "");
+  const [requestedByPhone, setRequestedByPhone] = useState(savedDraft.requestedByPhone ?? "");
+  const [requestedByEmail, setRequestedByEmail] = useState(savedDraft.requestedByEmail ?? "");
+  const [notes, setNotes] = useState(savedDraft.notes ?? "");
+  const [attachment, setAttachment] = useState<File | null>(null);
   const [items, setItems] = useState<OrderDraftItem[]>([{ product_id: "", quantity: 1, unit_price: 0 }]);
 
   const contacts = data.contacts.filter((contact) => contact.customer_id === customerId);
   const salespeople = data.profiles.filter((candidate) => candidate.role === "comercial" || candidate.role === "admin");
   const total = items.reduce((sum, item) => sum + Number(item.quantity) * Number(item.unit_price), 0);
+
+  useEffect(() => {
+    writeDraft(DRAFT_KEYS.newOrder, {
+      customerId,
+      contactId,
+      channel,
+      assignedSalespersonId,
+      deliveryAddress,
+      requestedDeliveryDate,
+      sourceMessage,
+      requestedByName,
+      requestedByPhone,
+      requestedByEmail,
+      notes
+    });
+  }, [customerId, contactId, channel, assignedSalespersonId, deliveryAddress, requestedDeliveryDate, sourceMessage, requestedByName, requestedByPhone, requestedByEmail, notes]);
 
   function updateCustomer(id: string) {
     setCustomerId(id);
@@ -1328,19 +1718,30 @@ function OrderForm({
   function submit() {
     const validItems = items.filter((item) => item.product_id && item.quantity > 0);
     if (!customerId || validItems.length === 0) return;
-    onCreate({
-      customer_id: customerId,
-      contact_id: contactId || null,
-      channel,
-      assigned_salesperson_id: assignedSalespersonId || profile.id,
-      delivery_address: deliveryAddress,
-      requested_delivery_date: requestedDeliveryDate || null,
-      source_message: sourceMessage,
-      notes,
-      items: validItems
-    });
+    onCreate(
+      {
+        customer_id: customerId,
+        contact_id: contactId || null,
+        channel,
+        assigned_salesperson_id: assignedSalespersonId || profile.id,
+        delivery_address: deliveryAddress,
+        requested_delivery_date: requestedDeliveryDate || null,
+        source_message: sourceMessage,
+        requested_by_name: requestedByName,
+        requested_by_phone: requestedByPhone,
+        requested_by_email: requestedByEmail,
+        notes,
+        items: validItems
+      },
+      attachment
+    );
+    clearDraft(DRAFT_KEYS.newOrder);
     setSourceMessage("");
+    setRequestedByName("");
+    setRequestedByPhone("");
+    setRequestedByEmail("");
     setNotes("");
+    setAttachment(null);
     setItems([{ product_id: "", quantity: 1, unit_price: 0 }]);
   }
 
@@ -1462,6 +1863,26 @@ function OrderForm({
           </div>
         </FormSection>
 
+        <FormSection
+          title="Solicitado por"
+          description="Persona que hizo la solicitud cuando es distinta del contacto (ej. el asistente de compras). Queda como registro del pedido, no crea un contacto nuevo."
+        >
+          <div className="form-grid three-columns">
+            <label>
+              Nombre
+              <input value={requestedByName} onChange={(event) => setRequestedByName(event.target.value)} data-testid="order-requested-by-name-input" />
+            </label>
+            <label>
+              Celular
+              <input value={requestedByPhone} onChange={(event) => setRequestedByPhone(event.target.value)} data-testid="order-requested-by-phone-input" />
+            </label>
+            <label>
+              Correo
+              <input type="email" value={requestedByEmail} onChange={(event) => setRequestedByEmail(event.target.value)} data-testid="order-requested-by-email-input" />
+            </label>
+          </div>
+        </FormSection>
+
         <FormSection title="Contexto" description="Conserva la informacion original del pedido y notas internas.">
           <div className="form-grid two-columns">
             <label>
@@ -1471,6 +1892,10 @@ function OrderForm({
             <label>
               Observaciones internas
               <textarea value={notes} onChange={(event) => setNotes(event.target.value)} data-testid="order-notes-input" />
+            </label>
+            <label>
+              Adjunto (orden de compra o captura de WhatsApp)
+              <input type="file" onChange={(event) => setAttachment(event.target.files?.[0] ?? null)} data-testid="order-attachment-input" />
             </label>
           </div>
         </FormSection>
@@ -1514,6 +1939,7 @@ function CustomerPanel({
   const [drawer, setDrawer] = useState<"customer" | "contact" | "contacts" | "prices" | null>(null);
   const [customerId, setCustomerId] = useState("");
   const [editingContactId, setEditingContactId] = useState<string | null>(null);
+  const customerDraft = useMemo(() => (drawer === "customer" ? readDraft(DRAFT_KEYS.newCustomer) : {}), [drawer]);
   const salespeople = data.profiles.filter((candidate) => candidate.role === "comercial" || candidate.role === "admin");
   const filteredCustomers = data.customers.filter((customer) => {
     const contacts = data.contacts.filter((contact) => contact.customer_id === customer.id);
@@ -1601,28 +2027,34 @@ function CustomerPanel({
       </section>
 
       <Drawer title="Nuevo cliente" open={drawer === "customer"} onClose={() => setDrawer(null)}>
-        <form className="drawer-form" onSubmit={(event) => {
-          event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          onCreateCustomer({
-            legal_name: String(form.get("legal_name") ?? ""),
-            nit: String(form.get("nit") ?? "") || null,
-            billing_email: String(form.get("billing_email") ?? "") || null,
-            main_address: String(form.get("main_address") ?? "") || null,
-            dispatch_address: String(form.get("dispatch_address") ?? "") || null,
-            assigned_salesperson_id: String(form.get("assigned_salesperson_id") ?? "") || (profile.role === "comercial" ? profile.id : null)
-          });
-          event.currentTarget.reset();
-          setDrawer(null);
-        }}>
-          <label>Razon social<input name="legal_name" required data-testid="customer-name-input" /></label>
-          <label>NIT<input name="nit" /></label>
-          <label>Correo factura<input name="billing_email" type="email" /></label>
-          <label>Direccion principal<input name="main_address" /></label>
-          <label>Direccion despacho<input name="dispatch_address" /></label>
+        <form
+          className="drawer-form"
+          onChange={(event) => writeDraft(DRAFT_KEYS.newCustomer, Object.fromEntries(new FormData(event.currentTarget).entries()) as Record<string, string>)}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            onCreateCustomer({
+              legal_name: String(form.get("legal_name") ?? ""),
+              nit: String(form.get("nit") ?? "") || null,
+              billing_email: String(form.get("billing_email") ?? "") || null,
+              main_address: String(form.get("main_address") ?? "") || null,
+              dispatch_address: String(form.get("dispatch_address") ?? "") || null,
+              assigned_salesperson_id: String(form.get("assigned_salesperson_id") ?? "") || (profile.role === "comercial" ? profile.id : null)
+            });
+            clearDraft(DRAFT_KEYS.newCustomer);
+            event.currentTarget.reset();
+            setDrawer(null);
+          }}
+        >
+          <p className="muted">Lo que escribas aqui se conserva si navegas a otra pagina antes de guardar.</p>
+          <label>Razon social<input name="legal_name" defaultValue={customerDraft.legal_name ?? ""} required data-testid="customer-name-input" /></label>
+          <label>NIT<input name="nit" defaultValue={customerDraft.nit ?? ""} /></label>
+          <label>Correo factura<input name="billing_email" type="email" defaultValue={customerDraft.billing_email ?? ""} /></label>
+          <label>Direccion principal<input name="main_address" defaultValue={customerDraft.main_address ?? ""} /></label>
+          <label>Direccion despacho<input name="dispatch_address" defaultValue={customerDraft.dispatch_address ?? ""} /></label>
           <label>
             Asesor asignado
-            <select name="assigned_salesperson_id" defaultValue={profile.role === "comercial" ? profile.id : ""}>
+            <select name="assigned_salesperson_id" defaultValue={customerDraft.assigned_salesperson_id ?? (profile.role === "comercial" ? profile.id : "")}>
               <option value="">Sin asignar</option>
               {salespeople.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>{candidate.full_name}</option>
@@ -2039,15 +2471,18 @@ function SettingsPage({
   profile,
   searchQuery,
   onCreateUser,
+  onUpdateProfile,
   isPending
 }: {
   data: AppData;
   profile: Profile;
   searchQuery: string;
   onCreateUser: (payload: CreateUserDraft) => void;
+  onUpdateProfile: (id: string, payload: Partial<Profile>) => void;
   isPending: boolean;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const isAdmin = profile.role === "admin";
   const filteredProfiles = data.profiles.filter((candidate) => {
     const haystack = [candidate.full_name, candidate.email, ROLE_LABELS[candidate.role], ROLE_DESCRIPTIONS[candidate.role]].join(" ").toLowerCase();
@@ -2095,6 +2530,7 @@ function SettingsPage({
                 <th>Responsabilidad</th>
                 <th>Estado</th>
                 <th>Creacion</th>
+                <th>Acciones</th>
               </tr>
             </thead>
             <tbody>
@@ -2106,6 +2542,9 @@ function SettingsPage({
                   <td>{ROLE_DESCRIPTIONS[userProfile.role]}</td>
                   <td><span className={`status-badge ${userProfile.active ? "status-delivered" : "status-cancelled"}`}>{userProfile.active ? "Activo" : "Inactivo"}</span></td>
                   <td>{formatDate(userProfile.created_at)}</td>
+                  <td>
+                    <button className="button-ghost button-small" type="button" onClick={() => setEditingProfile(userProfile)}>Editar</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2152,6 +2591,43 @@ function SettingsPage({
           </div>
         </form>
       </Drawer>
+
+      <Drawer title="Editar usuario" open={editingProfile !== null} onClose={() => setEditingProfile(null)}>
+        {editingProfile && (
+          <form
+            className="drawer-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const form = new FormData(event.currentTarget);
+              onUpdateProfile(editingProfile.id, {
+                full_name: String(form.get("full_name") ?? ""),
+                role: String(form.get("role") ?? editingProfile.role) as UserRole,
+                active: form.get("active") === "on"
+              });
+              setEditingProfile(null);
+            }}
+          >
+            <label>Nombre completo<input name="full_name" defaultValue={editingProfile.full_name} required data-testid="user-edit-name-input" /></label>
+            <label>Correo electronico<input value={editingProfile.email} disabled /></label>
+            <label>
+              Rol
+              <select name="role" defaultValue={editingProfile.role} required data-testid="user-edit-role-select">
+                {ROLE_OPTIONS.map((role) => (
+                  <option key={role} value={role}>{ROLE_LABELS[role]}</option>
+                ))}
+              </select>
+            </label>
+            <label className="checkbox-field">
+              <input name="active" type="checkbox" defaultChecked={editingProfile.active} />
+              Usuario activo
+            </label>
+            <div className="drawer-actions">
+              <button className="button-ghost" type="button" onClick={() => setEditingProfile(null)}>Cancelar</button>
+              <button className="button" disabled={isPending} data-testid="user-edit-submit-button">Guardar cambios</button>
+            </div>
+          </form>
+        )}
+      </Drawer>
     </div>
   );
 }
@@ -2164,11 +2640,13 @@ function OrderActionPanel({
   salesperson,
   creator,
   items,
+  products,
   events,
   isPending,
   readOnly,
   onTransition,
-  onOpenAttachment
+  onOpenAttachment,
+  onUpdateOrder
 }: {
   order: Order;
   profile: Profile;
@@ -2177,17 +2655,30 @@ function OrderActionPanel({
   salesperson?: Profile;
   creator?: Profile;
   items: OrderItem[];
+  products: Product[];
   events: AppData["events"];
   isPending: boolean;
   readOnly: boolean;
   onTransition: (order: Order, transition: TransitionDefinition, extras: TransitionExtras) => void;
   onOpenAttachment: (path: string) => void;
+  onUpdateOrder: (orderId: string, payload: OrderFieldsUpdate, files: OrderFieldsUpdateFiles, editedItems: EditableOrderItem[]) => void;
 }) {
   const [note, setNote] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState(order.invoice_number ?? "");
   const [remissionNumber, setRemissionNumber] = useState(order.remission_number ?? "");
   const [dispatchGuide, setDispatchGuide] = useState(order.dispatch_guide ?? "");
   const [file, setFile] = useState<File | null>(null);
+  const [isEditingFields, setIsEditingFields] = useState(false);
+  const [editDeliveryAddress, setEditDeliveryAddress] = useState(order.delivery_address ?? "");
+  const [editRequestedDeliveryDate, setEditRequestedDeliveryDate] = useState(order.requested_delivery_date ?? "");
+  const [editNotes, setEditNotes] = useState(order.notes ?? "");
+  const [editInvoiceNumber, setEditInvoiceNumber] = useState(order.invoice_number ?? "");
+  const [editRemissionNumber, setEditRemissionNumber] = useState(order.remission_number ?? "");
+  const [editDispatchGuide, setEditDispatchGuide] = useState(order.dispatch_guide ?? "");
+  const [editInvoiceFile, setEditInvoiceFile] = useState<File | null>(null);
+  const [editDispatchFile, setEditDispatchFile] = useState<File | null>(null);
+  const [editItems, setEditItems] = useState<EditableOrderItem[]>([]);
+  const canEditFields = profile.role === "admin";
   const pendingRemissionInvoice = hasPendingRemissionInvoice(order);
   const availableTransitions = readOnly ? [] : getAvailableTransitions(order.status, profile.role)
     .filter((transition) => isTransitionVisibleForOrder(transition, order));
@@ -2205,19 +2696,137 @@ function OrderActionPanel({
     setFile(null);
   }
 
+  function startEditing() {
+    setEditItems(items.map((item) => ({ id: item.id, product_id: item.product_id ?? "", quantity: item.quantity, unit_price: item.unit_price })));
+    setIsEditingFields(true);
+  }
+
+  function updateEditItem(index: number, patch: Partial<EditableOrderItem>) {
+    setEditItems((current) => current.map((item, currentIndex) => (currentIndex === index ? { ...item, ...patch } : item)));
+  }
+
+  function submitFieldsEdit() {
+    onUpdateOrder(
+      order.id,
+      {
+        delivery_address: editDeliveryAddress || null,
+        requested_delivery_date: editRequestedDeliveryDate || null,
+        notes: editNotes || null,
+        invoice_number: editInvoiceNumber || null,
+        remission_number: editRemissionNumber || null,
+        dispatch_guide: editDispatchGuide || null
+      },
+      { invoiceFile: editInvoiceFile, dispatchFile: editDispatchFile },
+      editItems
+    );
+    setEditInvoiceFile(null);
+    setEditDispatchFile(null);
+    setIsEditingFields(false);
+  }
+
   return (
     <div className="order-detail-panel">
       <div className="detail-grid">
         <section className="detail-card">
-          <h3>Resumen del pedido</h3>
-          <dl className="definition-list">
-            <div><dt>Cliente</dt><dd>{customer?.legal_name ?? "Cliente no visible"}</dd></div>
-            <div><dt>Contacto</dt><dd>{contact?.full_name ?? "Sin contacto"}</dd></div>
-            <div><dt>Asesor</dt><dd>{salesperson?.full_name ?? creator?.full_name ?? "Sin asesor"}</dd></div>
-            <div><dt>Preparacion/envio</dt><dd>{order.delivery_address || customer?.dispatch_address || "Sin direccion"}</dd></div>
-            <div><dt>Fecha solicitada</dt><dd>{formatDate(order.requested_delivery_date)}</dd></div>
-            <div><dt>Total referencia</dt><dd>{formatMoney(total)}</dd></div>
-          </dl>
+          <div className="panel-header compact">
+            <h3>Resumen del pedido</h3>
+            {canEditFields && !isEditingFields && (
+              <button className="button-ghost button-small" type="button" onClick={startEditing}>Editar</button>
+            )}
+          </div>
+          {isEditingFields ? (
+            <div className="drawer-form">
+              <label>Direccion<input value={editDeliveryAddress} onChange={(event) => setEditDeliveryAddress(event.target.value)} /></label>
+              <label>Fecha solicitada<input type="date" value={editRequestedDeliveryDate ?? ""} onChange={(event) => setEditRequestedDeliveryDate(event.target.value)} /></label>
+              <label>Observaciones internas<textarea value={editNotes} onChange={(event) => setEditNotes(event.target.value)} /></label>
+
+              <p className="muted">Productos del pedido - agregar, quitar o cambiar cantidad/precio queda en la trazabilidad.</p>
+              <div className="line-items-header">
+                <span>{editItems.length} lineas</span>
+                <button
+                  className="button-ghost button-small"
+                  type="button"
+                  onClick={() => setEditItems([...editItems, { id: null, product_id: "", quantity: 1, unit_price: 0 }])}
+                >
+                  Agregar producto
+                </button>
+              </div>
+              <div className="line-items">
+                {editItems.map((item, index) => (
+                  <div className="line-item-grid" key={`${item.id ?? "new"}-${index}`}>
+                    <label>
+                      Producto
+                      <select value={item.product_id} onChange={(event) => updateEditItem(index, { product_id: event.target.value })}>
+                        <option value="">Seleccionar</option>
+                        {products.map((product) => (
+                          <option key={product.id} value={product.id}>{product.name} ({product.unit})</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Cantidad
+                      <input type="number" min="0.01" step="0.01" value={item.quantity} onChange={(event) => updateEditItem(index, { quantity: Number(event.target.value) })} />
+                    </label>
+                    <label>
+                      Precio
+                      <input type="number" min="0" step="1" value={item.unit_price} onChange={(event) => updateEditItem(index, { unit_price: Number(event.target.value) })} />
+                    </label>
+                    <div className="line-total">
+                      <span>Total</span>
+                      <strong>{formatMoney(Number(item.quantity) * Number(item.unit_price))}</strong>
+                    </div>
+                    <button
+                      className="button-ghost button-small"
+                      type="button"
+                      onClick={() => setEditItems(editItems.filter((_, currentIndex) => currentIndex !== index))}
+                      disabled={editItems.length === 1}
+                    >
+                      Quitar
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <p className="muted">Documentos y facturacion - se registra en la trazabilidad cualquier cambio.</p>
+              <label>Numero de factura<input value={editInvoiceNumber} onChange={(event) => setEditInvoiceNumber(event.target.value)} /></label>
+              <label>Numero de remision<input value={editRemissionNumber} onChange={(event) => setEditRemissionNumber(event.target.value)} /></label>
+              <label>
+                Reemplazar adjunto de factura/remision
+                {order.invoice_file_path && (
+                  <button type="button" className="link-button" onClick={() => onOpenAttachment(order.invoice_file_path!)}>Ver actual</button>
+                )}
+                <input type="file" onChange={(event) => setEditInvoiceFile(event.target.files?.[0] ?? null)} />
+              </label>
+              <label>Guia / soporte de envio<input value={editDispatchGuide} onChange={(event) => setEditDispatchGuide(event.target.value)} /></label>
+              <label>
+                Reemplazar adjunto de guia de envio
+                {order.dispatch_file_path && (
+                  <button type="button" className="link-button" onClick={() => onOpenAttachment(order.dispatch_file_path!)}>Ver actual</button>
+                )}
+                <input type="file" onChange={(event) => setEditDispatchFile(event.target.files?.[0] ?? null)} />
+              </label>
+              <div className="drawer-actions">
+                <button className="button-ghost button-small" type="button" onClick={() => setIsEditingFields(false)}>Cancelar</button>
+                <button className="button button-small" type="button" disabled={isPending} onClick={submitFieldsEdit}>Guardar cambios</button>
+              </div>
+            </div>
+          ) : (
+            <dl className="definition-list">
+              <div><dt>Cliente</dt><dd>{customer?.legal_name ?? "Cliente no visible"}</dd></div>
+              <div><dt>Contacto</dt><dd>{contact?.full_name ?? "Sin contacto"}</dd></div>
+              <div><dt>Asesor</dt><dd>{salesperson?.full_name ?? creator?.full_name ?? "Sin asesor"}</dd></div>
+              <div><dt>Preparacion/envio</dt><dd>{order.delivery_address || customer?.dispatch_address || "Sin direccion"}</dd></div>
+              <div><dt>Fecha solicitada</dt><dd>{formatDate(order.requested_delivery_date)}</dd></div>
+              <div><dt>Total referencia</dt><dd>{formatMoney(total)}</dd></div>
+              {order.requested_by_name && (
+                <div>
+                  <dt>Solicitado por</dt>
+                  <dd>{order.requested_by_name}{order.requested_by_phone ? ` · ${order.requested_by_phone}` : ""}{order.requested_by_email ? ` · ${order.requested_by_email}` : ""}</dd>
+                </div>
+              )}
+              {order.notes && <div><dt>Observaciones</dt><dd>{order.notes}</dd></div>}
+            </dl>
+          )}
         </section>
 
         <section className="detail-card">
@@ -2241,6 +2850,7 @@ function OrderActionPanel({
             {order.dispatch_guide && <span className="metadata-pill">Guia: {order.dispatch_guide}</span>}
             {order.invoice_file_path && <button className="button-ghost button-small" onClick={() => onOpenAttachment(order.invoice_file_path!)}>Ver factura/remision</button>}
             {order.dispatch_file_path && <button className="button-ghost button-small" onClick={() => onOpenAttachment(order.dispatch_file_path!)}>Ver guia</button>}
+            {order.source_attachment_path && <button className="button-ghost button-small" onClick={() => onOpenAttachment(order.source_attachment_path!)}>Ver adjunto de la solicitud</button>}
           </div>
           <div className="attachment-section">
             <h4>Adjuntos por etapa</h4>
@@ -2636,11 +3246,13 @@ function getAttachmentFileName(path: string) {
 
 function getEventActionLabel(action: string) {
   if (action === "created") return "Pedido creado";
+  if (action === "edited") return "Pedido editado por admin";
   return TRANSITIONS.find((transition) => transition.action === action)?.label ?? action;
 }
 
 function getEventStageLabel(event: OrderEvent) {
   if (event.action === "created" || event.action === "submit_for_approval") return "Registro comercial";
+  if (event.action === "edited") return "Edicion manual (admin)";
   if (event.action === "approve" || event.action === "reject") return "Aprobacion";
   if (event.action === "invoice" || event.action === "remit" || event.action === "invoice_after_dispatch") return "Facturacion";
   if (event.action === "dispatch" || event.action === "retry_dispatch") return "Despacho / envio";
@@ -2648,6 +3260,23 @@ function getEventStageLabel(event: OrderEvent) {
   if (event.action === "novelty") return "Novedad";
   if (event.action === "cancel") return "Anulacion";
   return event.to_status ? STATUS_LABELS[event.to_status] : "Trazabilidad";
+}
+
+const EDITABLE_ORDER_FIELD_LABELS: Record<string, string> = {
+  delivery_address: "Direccion",
+  requested_delivery_date: "Fecha solicitada",
+  notes: "Observaciones",
+  invoice_number: "Factura",
+  remission_number: "Remision",
+  dispatch_guide: "Guia despacho",
+  invoice_file_path: "Adjunto factura/remision",
+  dispatch_file_path: "Adjunto guia despacho"
+};
+
+function describeOrderFieldChanges(changes: Record<string, { from: unknown; to: unknown }>) {
+  return Object.entries(changes)
+    .map(([key, { from, to }]) => `${EDITABLE_ORDER_FIELD_LABELS[key] ?? key}: "${from ?? "vacio"}" -> "${to ?? "vacio"}"`)
+    .join("; ");
 }
 
 function createLookups(data: AppData) {
@@ -2954,7 +3583,7 @@ function flowStateLabel(state: "completed" | "current" | "pending" | "blocked") 
 
 async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Session) {
   const { data: profileData, error: profileError } = await supabase
-    .from("dromedario_profiles")
+    .from(dromedarioTable("profiles"))
     .select("*")
     .eq("id", session.user.id)
     .maybeSingle();
@@ -2965,7 +3594,7 @@ async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Sessio
 
   if (!profile) {
     const { data: insertedProfile, error: insertError } = await supabase
-      .from("dromedario_profiles")
+      .from(dromedarioTable("profiles"))
       .insert({
         id: session.user.id,
         email: session.user.email ?? "sin-correo@local",
@@ -2979,14 +3608,14 @@ async function bootstrapUser(supabase: DromedarioSupabaseClient, session: Sessio
   }
 
   const [profiles, customers, contacts, products, customerProductPrices, orders, orderItems, events] = await Promise.all([
-    supabase.from("dromedario_profiles").select("*").order("full_name", { ascending: true }),
-    supabase.from("dromedario_customers").select("*").order("legal_name", { ascending: true }),
-    supabase.from("dromedario_contacts").select("*").order("full_name", { ascending: true }),
-    supabase.from("dromedario_products").select("*").order("name", { ascending: true }),
-    supabase.from("dromedario_customer_product_prices").select("*"),
-    supabase.from("dromedario_orders").select("*").order("created_at", { ascending: false }),
-    supabase.from("dromedario_order_items").select("*").order("created_at", { ascending: true }),
-    supabase.from("dromedario_order_events").select("*").order("created_at", { ascending: false })
+    supabase.from(dromedarioTable("profiles")).select("*").order("full_name", { ascending: true }),
+    supabase.from(dromedarioTable("customers")).select("*").order("legal_name", { ascending: true }),
+    supabase.from(dromedarioTable("contacts")).select("*").order("full_name", { ascending: true }),
+    supabase.from(dromedarioTable("products")).select("*").order("name", { ascending: true }),
+    supabase.from(dromedarioTable("customer_product_prices")).select("*"),
+    supabase.from(dromedarioTable("orders")).select("*").order("created_at", { ascending: false }),
+    supabase.from(dromedarioTable("order_items")).select("*").order("created_at", { ascending: true }),
+    supabase.from(dromedarioTable("order_events")).select("*").order("created_at", { ascending: false })
   ]);
 
   const results = [profiles, customers, contacts, products, customerProductPrices, orders, orderItems, events];

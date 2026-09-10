@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "comercial" | "facturacion" | "despacho";
+export type UserRole = "admin" | "comercial" | "facturacion" | "despacho" | "digitador";
 
 export type OrderStatus =
   | "registered"
@@ -84,6 +84,10 @@ export interface Order {
   delivery_address: string | null;
   requested_delivery_date: string | null;
   source_message: string | null;
+  source_attachment_path: string | null;
+  requested_by_name: string | null;
+  requested_by_phone: string | null;
+  requested_by_email: string | null;
   notes: string | null;
   admin_approved_by: string | null;
   admin_approved_at: string | null;

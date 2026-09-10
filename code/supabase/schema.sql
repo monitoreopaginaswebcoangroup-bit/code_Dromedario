@@ -24,11 +24,18 @@ create table if not exists public.dromedario_profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
   full_name text not null,
-  role text not null default 'comercial' check (role in ('admin', 'comercial', 'facturacion', 'despacho')),
+  role text not null default 'comercial' check (role in ('admin', 'comercial', 'facturacion', 'despacho', 'digitador')),
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- "digitador" role added after the initial release: "create table if not
+-- exists" above does not update the check constraint on a table that already
+-- exists, so re-apply it explicitly to keep re-runs of this script idempotent.
+alter table public.dromedario_profiles drop constraint if exists dromedario_profiles_role_check;
+alter table public.dromedario_profiles add constraint dromedario_profiles_role_check
+  check (role in ('admin', 'comercial', 'facturacion', 'despacho', 'digitador'));
 
 create table if not exists public.dromedario_customers (
   id uuid primary key default gen_random_uuid(),
@@ -104,6 +111,10 @@ create table if not exists public.dromedario_orders (
   delivery_address text,
   requested_delivery_date date,
   source_message text,
+  source_attachment_path text,
+  requested_by_name text,
+  requested_by_phone text,
+  requested_by_email text,
   notes text,
   admin_approved_by uuid references public.dromedario_profiles(id),
   admin_approved_at timestamptz,
@@ -122,6 +133,14 @@ create table if not exists public.dromedario_orders (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Columns added after the initial release: "create table if not exists" above
+-- is a no-op on a table that already exists, so these keep re-runs of this
+-- script idempotent on a database that was provisioned before this change.
+alter table public.dromedario_orders add column if not exists source_attachment_path text;
+alter table public.dromedario_orders add column if not exists requested_by_name text;
+alter table public.dromedario_orders add column if not exists requested_by_phone text;
+alter table public.dromedario_orders add column if not exists requested_by_email text;
 
 create table if not exists public.dromedario_order_items (
   id uuid primary key default gen_random_uuid(),
@@ -208,6 +227,9 @@ as $$
   select role from public.dromedario_profiles where id = auth.uid() and active = true;
 $$;
 
+-- "Backoffice" here also covers "digitador" (data-entry only role): both see
+-- the full customer/contact/pricing base regardless of assignment, unlike
+-- comercial who only sees their own. digitador has no access anywhere else.
 create or replace function public.dromedario_current_user_is_backoffice()
 returns boolean
 language sql
@@ -215,7 +237,7 @@ security definer
 stable
 set search_path = public
 as $$
-  select coalesce(public.dromedario_current_user_role() in ('admin', 'facturacion', 'despacho'), false);
+  select coalesce(public.dromedario_current_user_role() in ('admin', 'facturacion', 'despacho', 'digitador'), false);
 $$;
 
 create or replace function public.dromedario_order_row_visible_to_current_user(order_record public.dromedario_orders)
@@ -396,6 +418,57 @@ for update to authenticated
 using (public.dromedario_current_user_role() = 'admin')
 with check (public.dromedario_current_user_role() = 'admin');
 
+-- Any authenticated user can update their own profile row (e.g. their
+-- Nombre completo from "Mi cuenta"). RLS alone cannot restrict which
+-- *columns* change on a row it already allows, so the trigger below is what
+-- actually blocks a self-edit from also sneaking in a role/active/email
+-- change - this policy only controls which *row* can be touched.
+drop policy if exists "dromedario profiles update own" on public.dromedario_profiles;
+create policy "dromedario profiles update own" on public.dromedario_profiles
+for update to authenticated
+using (id = auth.uid())
+with check (id = auth.uid());
+
+-- Replaces a Lovable Cloud-generated guard (private.dromedario_prevent_profile_escalation)
+-- that was blocking legitimate admin-driven role changes made through the
+-- admin-create-user Edge Function (it runs with the service_role key, which
+-- has no bearing on auth.uid()/auth.role() the way that guard expected).
+-- This version explicitly exempts service_role calls (our Edge Functions
+-- already do their own admin check in application code before writing) and
+-- otherwise only allows a role/active/email change when the acting browser
+-- session is itself an admin - so a normal self-edit of just "full_name"
+-- always succeeds, but cannot also elevate the caller's own role.
+drop trigger if exists dromedario_profiles_prevent_escalation on public.dromedario_profiles;
+drop function if exists private.dromedario_prevent_profile_escalation();
+
+create or replace function public.dromedario_prevent_self_role_escalation()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.role() = 'service_role' then
+    return new;
+  end if;
+
+  if (
+    new.role is distinct from old.role
+    or new.active is distinct from old.active
+    or new.email is distinct from old.email
+  ) and public.dromedario_current_user_role() is distinct from 'admin' then
+    raise exception 'No autorizado para modificar rol, correo o estado del perfil';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists dromedario_profiles_prevent_self_role_escalation on public.dromedario_profiles;
+create trigger dromedario_profiles_prevent_self_role_escalation
+  before update on public.dromedario_profiles
+  for each row execute function public.dromedario_prevent_self_role_escalation();
+
 drop policy if exists "dromedario customers select by role" on public.dromedario_customers;
 create policy "dromedario customers select by role" on public.dromedario_customers
 for select to authenticated
@@ -516,15 +589,17 @@ for select to authenticated
 using (active = true or public.dromedario_current_user_role() = 'admin');
 
 drop policy if exists "dromedario products insert backoffice" on public.dromedario_products;
-create policy "dromedario products insert backoffice" on public.dromedario_products
+drop policy if exists "dromedario products insert admin" on public.dromedario_products;
+create policy "dromedario products insert admin" on public.dromedario_products
 for insert to authenticated
-with check (public.dromedario_current_user_role() in ('admin', 'facturacion'));
+with check (public.dromedario_current_user_role() = 'admin');
 
 drop policy if exists "dromedario products update backoffice" on public.dromedario_products;
-create policy "dromedario products update backoffice" on public.dromedario_products
+drop policy if exists "dromedario products update admin" on public.dromedario_products;
+create policy "dromedario products update admin" on public.dromedario_products
 for update to authenticated
-using (public.dromedario_current_user_role() in ('admin', 'facturacion'))
-with check (public.dromedario_current_user_role() in ('admin', 'facturacion'));
+using (public.dromedario_current_user_role() = 'admin')
+with check (public.dromedario_current_user_role() = 'admin');
 
 drop policy if exists "dromedario orders select by role" on public.dromedario_orders;
 create policy "dromedario orders select by role" on public.dromedario_orders
@@ -542,6 +617,14 @@ for update to authenticated
 using (public.dromedario_order_actionable_by_current_user(id))
 with check (public.dromedario_order_row_visible_to_current_user(dromedario_orders));
 
+-- Admin can always edit an order's reference fields (address, requested date,
+-- notes) even when it is not in an actionable state for a status transition.
+drop policy if exists "dromedario orders update admin always" on public.dromedario_orders;
+create policy "dromedario orders update admin always" on public.dromedario_orders
+for update to authenticated
+using (public.dromedario_current_user_role() = 'admin')
+with check (public.dromedario_current_user_role() = 'admin');
+
 drop policy if exists "dromedario order items select visible orders" on public.dromedario_order_items;
 create policy "dromedario order items select visible orders" on public.dromedario_order_items
 for select to authenticated
@@ -558,6 +641,25 @@ with check (
       and public.dromedario_current_user_role() in ('admin', 'comercial')
   )
 );
+
+-- Admin can always add, edit or remove line items on any order (editing an
+-- existing order's products/quantities/prices), regardless of who created it
+-- or its current status.
+drop policy if exists "dromedario order items admin always insert" on public.dromedario_order_items;
+create policy "dromedario order items admin always insert" on public.dromedario_order_items
+for insert to authenticated
+with check (public.dromedario_current_user_role() = 'admin');
+
+drop policy if exists "dromedario order items admin always update" on public.dromedario_order_items;
+create policy "dromedario order items admin always update" on public.dromedario_order_items
+for update to authenticated
+using (public.dromedario_current_user_role() = 'admin')
+with check (public.dromedario_current_user_role() = 'admin');
+
+drop policy if exists "dromedario order items admin always delete" on public.dromedario_order_items;
+create policy "dromedario order items admin always delete" on public.dromedario_order_items
+for delete to authenticated
+using (public.dromedario_current_user_role() = 'admin');
 
 drop policy if exists "dromedario order events select visible orders" on public.dromedario_order_events;
 create policy "dromedario order events select visible orders" on public.dromedario_order_events
@@ -606,6 +708,17 @@ with check (
     where o.id::text = split_part(name, '/', 1)
       and public.dromedario_order_actionable_by_current_user(o.id)
   )
+);
+
+-- Admin can always attach a replacement factura/remision/guia file, even on a
+-- closed order (delivered/cancelled/rejected), matching the "admin always"
+-- update policy on dromedario_orders itself.
+drop policy if exists "dromedario order documents admin always insert" on storage.objects;
+create policy "dromedario order documents admin always insert" on storage.objects
+for insert to authenticated
+with check (
+  bucket_id = 'dromedario-order-documents'
+  and public.dromedario_current_user_role() = 'admin'
 );
 
 drop policy if exists "dromedario order documents update visible orders" on storage.objects;

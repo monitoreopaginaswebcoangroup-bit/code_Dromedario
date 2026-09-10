@@ -1275,6 +1275,10 @@ button.stat-card {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.three-columns {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .four-columns {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1748,6 +1752,7 @@ button.stat-card {
     display: none;
   }
 
+  .three-columns,
   .four-columns,
   .five-columns {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1869,6 +1874,7 @@ button.stat-card {
   .stats-grid,
   .filter-bar,
   .two-columns,
+  .three-columns,
   .four-columns,
   .five-columns,
   .line-item-grid {

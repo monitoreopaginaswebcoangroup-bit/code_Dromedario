@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.55.0";
 
-type UserRole = "admin" | "comercial" | "facturacion" | "despacho";
+type UserRole = "admin" | "comercial" | "facturacion" | "despacho" | "digitador";
 
 interface CreateUserPayload {
   email?: unknown;
@@ -10,8 +10,15 @@ interface CreateUserPayload {
   role?: unknown;
 }
 
-const PROFILES_TABLE = "dromedario_profiles";
-const VALID_ROLES: UserRole[] = ["admin", "comercial", "facturacion", "despacho"];
+// Production (and any Supabase project shared with other apps, e.g. Lovable Cloud)
+// keeps everything in "public" with a dromedario_ prefix. A dedicated project
+// (e.g. local dev) can instead use its own "dromedario" schema with unprefixed
+// table names by setting the SUPABASE_DB_SCHEMA secret to "dromedario".
+const configuredSchema = (Deno.env.get("SUPABASE_DB_SCHEMA") ?? "public").trim();
+const SUPABASE_DB_SCHEMA = configuredSchema.length > 0 ? configuredSchema : "public";
+const usesDedicatedSchema = SUPABASE_DB_SCHEMA !== "public";
+const PROFILES_TABLE = usesDedicatedSchema ? "profiles" : "dromedario_profiles";
+const VALID_ROLES: UserRole[] = ["admin", "comercial", "facturacion", "despacho", "digitador"];
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -43,6 +50,7 @@ serve(async (request) => {
   if (!payload.ok) return jsonError(payload.error, 400);
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+    ...(usesDedicatedSchema ? { db: { schema: SUPABASE_DB_SCHEMA } } : {}),
     auth: {
       autoRefreshToken: false,
       persistSession: false
